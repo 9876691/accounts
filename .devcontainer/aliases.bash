@@ -12,6 +12,7 @@ alias gitsetup='git config --global user.name \$NAME && git config --global user
 
 # Cargo watch
 alias cw='cargo watch --no-gitignore -i *.scss -i *.ts -i "package*" -x fmt -x clippy -x run'
+alias cwt='cargo watch --no-gitignore -i *.scss -i *.ts -i "package*" -x fmt -x clippy -x "run < test.csv"'
 
 # npm
 alias nrs='npm run start'
