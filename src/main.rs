@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 
+// This is what we pull out of the CSV
 #[derive(Debug, Deserialize)]
 struct CsvTransaction {
     #[serde(rename = "type")]
@@ -12,12 +13,16 @@ struct CsvTransaction {
     amount: Option<f32>,
 }
 
+// We'll tighten up the data model using an enum, then the compiler
+// can help us as we don't have to do stribng compares on transaction type.
 struct Transaction {
     tx_type: TransactionType,
     client_id: u16,
     transaction_id: u32,
 }
 
+// Amounts are converted from float to integer. This is so we don't
+// get issues with rounding etc.
 #[derive(Clone)]
 enum TransactionType {
     Dispute,
@@ -27,6 +32,7 @@ enum TransactionType {
     Chargeback,
 }
 
+// Convert the transaction we get out of the CSV into our Transaction and enum
 impl Transaction {
     fn from(tx: CsvTransaction) -> Option<Transaction> {
         match tx {
@@ -73,6 +79,7 @@ impl Transaction {
     }
 }
 
+// An account has a bunch of transactions
 struct Account {
     id: u16,
     transactions: Vec<Transaction>,
@@ -101,6 +108,7 @@ impl Account {
     }
 }
 
+// Our accoubnt database
 struct Accounts {
     accounts: HashMap<u16, Account>,
 }
@@ -113,6 +121,8 @@ impl Default for Accounts {
     }
 }
 
+// Implement the ability to add transactions to our accounts and will
+// also implement the functionality to get the final balances.
 impl Accounts {
     fn add_transaction(&mut self, tx: Transaction) {
         if let Some(account) = self.accounts.get_mut(&tx.client_id) {
@@ -150,6 +160,7 @@ impl Account {
         let mut available: u64 = 0;
         let mut locked: bool = false;
 
+        // The logic for running through transaction and updating held and available.
         for tx in &self.transactions {
             match tx.tx_type {
                 TransactionType::Chargeback => {}
@@ -176,7 +187,30 @@ impl Account {
                         _ => {}
                     }
                 }
-                TransactionType::Resolve => {}
+                // A resolve represents a resolution to a dispute, releasing the associated held funds. 
+                // Funds that were previously disputed are no longer disputed. This means that the clients 
+                // held funds should decrease by the amount no longer disputed, their available funds should 
+                // increase by the amount no longer disputed, and their total funds should remain the same.
+                TransactionType::Resolve => {
+                    let tx = self.get_disputed_transaction(tx.transaction_id);
+                    match tx {
+                        Some(Transaction {
+                            tx_type: TransactionType::Withdrawal { amount },
+                            ..
+                        }) => {
+                            held += amount;
+                            available -= amount;
+                        }
+                        Some(Transaction {
+                            tx_type: TransactionType::Deposit { amount },
+                            ..
+                        }) => {
+                            held -= amount;
+                            available += amount;
+                        }
+                        _ => {}
+                    }
+                }
                 TransactionType::Withdrawal { amount } => {
                     if amount <= available {
                         available -= amount;
@@ -215,4 +249,175 @@ fn main() -> Result<(), Box<dyn Error>> {
     dbg!(closing_balances);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deposits_and_withdrawals() {
+
+        let mut accounts: Accounts = Default::default();
+
+        // Make an inital deposit
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 1,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+
+        assert_eq!(closing_balances.len(), 1);
+
+        assert_eq!(closing_balances.get(0).unwrap().total, 10_5000);
+
+        // Make another deposit
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 20_5000 },
+            client_id: 1,
+            transaction_id: 2,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.get(0).unwrap().total, 31_0000);
+
+        // Make a withdrawal for more money than we have
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Withdrawal{ amount: 40_0000 },
+            client_id: 1,
+            transaction_id: 2,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.get(0).unwrap().total, 31_0000);
+
+        // Make a withdrawal for fubnds we have
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Withdrawal{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 2,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.get(0).unwrap().total, 20_5000);
+
+        // Some more just in case
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 50_5000 },
+            client_id: 1,
+            transaction_id: 2,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Withdrawal{ amount: 40_5000 },
+            client_id: 1,
+            transaction_id: 2,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.get(0).unwrap().total, 30_5000);
+    }
+
+    #[test]
+    fn test_multiple_clients() {
+
+        let mut accounts: Accounts = Default::default();
+
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 1,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 2,
+            transaction_id: 2,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 3,
+            transaction_id: 3,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 4,
+            transaction_id: 4,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 5,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 6,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 7,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 8,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.len(), 4);
+    }
+
+    #[test]
+    fn test_dispute_and_resolve() {
+
+        let mut accounts: Accounts = Default::default();
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 1,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Dispute,
+            client_id: 1,
+            transaction_id: 1,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.len(), 1);
+        assert_eq!(closing_balances.get(0).unwrap().total, 10_5000);
+        assert_eq!(closing_balances.get(0).unwrap().held, 10_5000);
+        assert_eq!(closing_balances.get(0).unwrap().available, 0);
+
+        // Keep adding money see what happens
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 3,
+        });
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            client_id: 1,
+            transaction_id: 4,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.len(), 1);
+        assert_eq!(closing_balances.get(0).unwrap().total, 31_5000);
+        assert_eq!(closing_balances.get(0).unwrap().held, 10_5000);
+        assert_eq!(closing_balances.get(0).unwrap().available, 21_0000);
+
+        accounts.add_transaction(Transaction {
+            tx_type: TransactionType::Resolve,
+            client_id: 1,
+            transaction_id: 1,
+        });
+
+        let closing_balances = accounts.generate_closing_balances();
+        assert_eq!(closing_balances.len(), 1);
+        assert_eq!(closing_balances.get(0).unwrap().total, 31_5000);
+        assert_eq!(closing_balances.get(0).unwrap().held, 0);
+        assert_eq!(closing_balances.get(0).unwrap().available, 31_5000);
+    }
 }
