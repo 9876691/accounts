@@ -5,78 +5,27 @@ use std::io;
 
 // This is what we pull out of the CSV
 #[derive(Debug, Deserialize)]
-struct CsvTransaction {
-    #[serde(rename = "type")]
-    tx_type: String,
-    client: u16,
-    tx: u32,
-    amount: Option<f32>,
-}
-
-// We'll tighten up the data model using an enum, then the compiler
-// can help us as we don't have to do stribng compares on transaction type.
 struct Transaction {
+    #[serde(rename = "type")]
     tx_type: TransactionType,
+    #[serde(rename = "client")]
     client_id: u16,
+    #[serde(rename = "tx")]
     transaction_id: u32,
+    // Amounts are converted from float to integer. This is so we don't
+    // get issues with rounding etc.
+    amount: Option<u64>,
 }
 
-// Amounts are converted from float to integer. This is so we don't
-// get issues with rounding etc.
-#[derive(Clone)]
+
+#[derive(Debug, Deserialize, PartialEq, Clone)]
+#[serde(rename_all = "lowercase")]
 enum TransactionType {
     Dispute,
-    Deposit { amount: u64 },
-    Withdrawal { amount: u64 },
+    Deposit,
+    Withdrawal,
     Resolve,
     Chargeback,
-}
-
-// Convert the transaction we get out of the CSV into our Transaction and enum
-impl Transaction {
-    fn from(tx: CsvTransaction) -> Option<Transaction> {
-        match tx {
-            CsvTransaction {
-                amount: Some(amount),
-                ..
-            } if tx.tx_type == "deposit" => Some(Transaction {
-                tx_type: TransactionType::Deposit {
-                    amount: (amount * 1000.0) as u64,
-                },
-                client_id: tx.client,
-                transaction_id: tx.tx,
-            }),
-
-            CsvTransaction { .. } if tx.tx_type == "dispute" => Some(Transaction {
-                tx_type: TransactionType::Dispute,
-                client_id: tx.client,
-                transaction_id: tx.tx,
-            }),
-            CsvTransaction {
-                amount: Some(amount),
-                ..
-            } if tx.tx_type == "withdrawal" => Some(Transaction {
-                tx_type: TransactionType::Withdrawal {
-                    amount: (amount * 1000.0) as u64,
-                },
-                client_id: tx.client,
-                transaction_id: tx.tx,
-            }),
-
-            CsvTransaction { .. } if tx.tx_type == "chargeback" => Some(Transaction {
-                tx_type: TransactionType::Chargeback,
-                client_id: tx.client,
-                transaction_id: tx.tx,
-            }),
-
-            CsvTransaction { .. } if tx.tx_type == "resolve" => Some(Transaction {
-                tx_type: TransactionType::Resolve,
-                client_id: tx.client,
-                transaction_id: tx.tx,
-            }),
-            _ => None,
-        }
-    }
 }
 
 // An account has a bunch of transactions
@@ -101,6 +50,7 @@ impl Account {
                 tx_type: tx.tx_type.clone(),
                 client_id: tx.client_id,
                 transaction_id: tx.transaction_id,
+                amount: tx.amount
             });
         }
 
@@ -162,23 +112,41 @@ impl Account {
 
         // The logic for running through transaction and updating held and available.
         for tx in &self.transactions {
-            match tx.tx_type {
-                TransactionType::Chargeback => {}
-                TransactionType::Deposit { amount } => {
+            match tx {
+                &Transaction {
+                    tx_type: TransactionType::Chargeback, ..
+                } => {
+                    let tx = self.get_disputed_transaction(tx.transaction_id);
+                    match tx {
+                        Some(Transaction {
+                            tx_type: TransactionType::Deposit,
+                            amount: Some(amount),
+                            ..
+                        }) => {
+                            held -= amount;
+                            locked = true;
+                        }
+                        _ => {}
+                    }
+                }
+                
+                &Transaction {
+                    tx_type: TransactionType::Deposit, 
+                    amount: Some(amount),
+                    ..
+                } =>  {
                     available += amount;
                 }
-                TransactionType::Dispute => {
+
+                &Transaction {
+                    tx_type: TransactionType::Dispute, 
+                    ..
+                } => {
                     let tx = self.get_disputed_transaction(tx.transaction_id);
                     match tx {
                         Some(Transaction {
-                            tx_type: TransactionType::Withdrawal { amount },
-                            ..
-                        }) => {
-                            held -= amount;
-                            available += amount;
-                        }
-                        Some(Transaction {
-                            tx_type: TransactionType::Deposit { amount },
+                            tx_type: TransactionType::Deposit,
+                            amount: Some(amount),
                             ..
                         }) => {
                             held += amount;
@@ -187,22 +155,16 @@ impl Account {
                         _ => {}
                     }
                 }
-                // A resolve represents a resolution to a dispute, releasing the associated held funds. 
-                // Funds that were previously disputed are no longer disputed. This means that the clients 
-                // held funds should decrease by the amount no longer disputed, their available funds should 
-                // increase by the amount no longer disputed, and their total funds should remain the same.
-                TransactionType::Resolve => {
+
+                &Transaction {
+                    tx_type: TransactionType::Resolve, 
+                    ..
+                } => {
                     let tx = self.get_disputed_transaction(tx.transaction_id);
                     match tx {
                         Some(Transaction {
-                            tx_type: TransactionType::Withdrawal { amount },
-                            ..
-                        }) => {
-                            held += amount;
-                            available -= amount;
-                        }
-                        Some(Transaction {
-                            tx_type: TransactionType::Deposit { amount },
+                            tx_type: TransactionType::Deposit,
+                            amount: Some(amount),
                             ..
                         }) => {
                             held -= amount;
@@ -211,11 +173,19 @@ impl Account {
                         _ => {}
                     }
                 }
-                TransactionType::Withdrawal { amount } => {
+
+                
+                &Transaction {
+                    tx_type: TransactionType::Withdrawal, 
+                    amount: Some(amount),
+                    ..
+                } =>  {
                     if amount <= available {
                         available -= amount;
                     }
                 }
+
+                _ => {}
             }
         }
 
@@ -235,13 +205,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     for result in rdr.deserialize() {
         // Notice that we need to provide a type hint for automatic
         // deserialization.
-        let record: CsvTransaction = result?;
+        let tx: Transaction = result?;
 
-        if let Some(tx) = Transaction::from(record) {
-            accounts.add_transaction(tx);
-        } else {
-            dbg!("Couldn't parse it.");
-        }
+        accounts.add_transaction(tx);
     }
 
     let closing_balances = accounts.generate_closing_balances();
@@ -262,9 +228,10 @@ mod tests {
 
         // Make an inital deposit
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 1,
+            amount: Some(10_5000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -275,9 +242,10 @@ mod tests {
 
         // Make another deposit
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 20_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 2,
+            amount: Some(20_5000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -285,9 +253,10 @@ mod tests {
 
         // Make a withdrawal for more money than we have
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Withdrawal{ amount: 40_0000 },
+            tx_type: TransactionType::Withdrawal,
             client_id: 1,
             transaction_id: 2,
+            amount: Some(40_0000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -295,9 +264,10 @@ mod tests {
 
         // Make a withdrawal for fubnds we have
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Withdrawal{ amount: 10_5000 },
+            tx_type: TransactionType::Withdrawal,
             client_id: 1,
             transaction_id: 2,
+            amount: Some(10_5000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -305,14 +275,16 @@ mod tests {
 
         // Some more just in case
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 50_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 2,
+            amount: Some(50_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Withdrawal{ amount: 40_5000 },
+            tx_type: TransactionType::Withdrawal,
             client_id: 1,
             transaction_id: 2,
+            amount: Some(40_5000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -325,44 +297,52 @@ mod tests {
         let mut accounts: Accounts = Default::default();
 
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 1,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 2,
             transaction_id: 2,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 3,
             transaction_id: 3,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 4,
             transaction_id: 4,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 5,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 6,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 7,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 8,
+            amount: Some(10_5000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -374,14 +354,16 @@ mod tests {
 
         let mut accounts: Accounts = Default::default();
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 1,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Dispute,
             client_id: 1,
             transaction_id: 1,
+            amount: None
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -392,14 +374,16 @@ mod tests {
 
         // Keep adding money see what happens
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 3,
+            amount: Some(10_5000)
         });
         accounts.add_transaction(Transaction {
-            tx_type: TransactionType::Deposit{ amount: 10_5000 },
+            tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 4,
+            amount: Some(10_5000)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -412,6 +396,7 @@ mod tests {
             tx_type: TransactionType::Resolve,
             client_id: 1,
             transaction_id: 1,
+            amount: None
         });
 
         let closing_balances = accounts.generate_closing_balances();
