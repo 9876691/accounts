@@ -1,7 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::error::Error;
-use std::io;
 
 // This is what we pull out of the CSV
 #[derive(Debug, Deserialize)]
@@ -12,11 +11,8 @@ struct Transaction {
     client_id: u16,
     #[serde(rename = "tx")]
     transaction_id: u32,
-    // Amounts are converted from float to integer. This is so we don't
-    // get issues with rounding etc.
-    amount: Option<u64>,
+    amount: Option<f32>,
 }
-
 
 #[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -98,16 +94,27 @@ impl Accounts {
 
 #[derive(Debug)]
 struct ClosingBalance {
-    held: u64,
-    available: u64,
-    total: u64,
+    client: u16,
+    held: f32,
+    available: f32,
+    total: f32,
     locked: bool,
+}
+
+impl ClosingBalance {
+    fn to_csv(&self) -> String {
+        format!("{},{},{},{}",
+            self.client,
+            self.available,
+            self.held,
+            self.total)
+    }
 }
 
 impl Account {
     fn closing_balance(&self) -> ClosingBalance {
-        let mut held: u64 = 0;
-        let mut available: u64 = 0;
+        let mut held: f32 = 0.0;
+        let mut available: f32 = 0.0;
         let mut locked: bool = false;
 
         // The logic for running through transaction and updating held and available.
@@ -190,6 +197,7 @@ impl Account {
         }
 
         ClosingBalance {
+            client: self.id,
             held,
             available,
             total: available + held,
@@ -200,19 +208,29 @@ impl Account {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut accounts: Accounts = Default::default();
+    let args: Vec<String> = std::env::args().collect();
 
-    let mut rdr = csv::Reader::from_reader(io::stdin());
-    for result in rdr.deserialize() {
-        // Notice that we need to provide a type hint for automatic
-        // deserialization.
-        let tx: Transaction = result?;
+    if let Some(filename) = args.first() {
 
-        accounts.add_transaction(tx);
+        let mut rdr = csv::Reader::from_path(filename)?;
+        for result in rdr.deserialize() {
+            // Notice that we need to provide a type hint for automatic
+            // deserialization.
+            let tx: Transaction = result?;
+    
+            accounts.add_transaction(tx);
+        }
+    
+        let closing_balances = accounts.generate_closing_balances();
+
+        println!("client,available,held,total");
+        for account in closing_balances {
+            println!("{}", account.to_csv());
+        }
+    
+    } else {
+        println!("Please pass in the name of the file.")
     }
-
-    let closing_balances = accounts.generate_closing_balances();
-
-    dbg!(closing_balances);
 
     Ok(())
 }
@@ -231,64 +249,64 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 1,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
 
         let closing_balances = accounts.generate_closing_balances();
 
         assert_eq!(closing_balances.len(), 1);
 
-        assert_eq!(closing_balances.get(0).unwrap().total, 10_5000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 10.5);
 
         // Make another deposit
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 2,
-            amount: Some(20_5000)
+            amount: Some(20.5)
         });
 
         let closing_balances = accounts.generate_closing_balances();
-        assert_eq!(closing_balances.get(0).unwrap().total, 31_0000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 31.0);
 
         // Make a withdrawal for more money than we have
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Withdrawal,
             client_id: 1,
             transaction_id: 2,
-            amount: Some(40_0000)
+            amount: Some(40.0)
         });
 
         let closing_balances = accounts.generate_closing_balances();
-        assert_eq!(closing_balances.get(0).unwrap().total, 31_0000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 31.0);
 
         // Make a withdrawal for fubnds we have
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Withdrawal,
             client_id: 1,
             transaction_id: 2,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
 
         let closing_balances = accounts.generate_closing_balances();
-        assert_eq!(closing_balances.get(0).unwrap().total, 20_5000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 20.5);
 
         // Some more just in case
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 2,
-            amount: Some(50_5000)
+            amount: Some(50.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Withdrawal,
             client_id: 1,
             transaction_id: 2,
-            amount: Some(40_5000)
+            amount: Some(40.5)
         });
 
         let closing_balances = accounts.generate_closing_balances();
-        assert_eq!(closing_balances.get(0).unwrap().total, 30_5000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 30.5);
     }
 
     #[test]
@@ -300,49 +318,49 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 1,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 2,
             transaction_id: 2,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 3,
             transaction_id: 3,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 4,
             transaction_id: 4,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 5,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 6,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 7,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 8,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
 
         let closing_balances = accounts.generate_closing_balances();
@@ -357,7 +375,7 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 1,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Dispute,
@@ -368,29 +386,29 @@ mod tests {
 
         let closing_balances = accounts.generate_closing_balances();
         assert_eq!(closing_balances.len(), 1);
-        assert_eq!(closing_balances.get(0).unwrap().total, 10_5000);
-        assert_eq!(closing_balances.get(0).unwrap().held, 10_5000);
-        assert_eq!(closing_balances.get(0).unwrap().available, 0);
+        assert_eq!(closing_balances.get(0).unwrap().total, 10.5);
+        assert_eq!(closing_balances.get(0).unwrap().held, 10.5);
+        assert_eq!(closing_balances.get(0).unwrap().available, 0.0);
 
         // Keep adding money see what happens
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 3,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Deposit,
             client_id: 1,
             transaction_id: 4,
-            amount: Some(10_5000)
+            amount: Some(10.5)
         });
 
         let closing_balances = accounts.generate_closing_balances();
         assert_eq!(closing_balances.len(), 1);
-        assert_eq!(closing_balances.get(0).unwrap().total, 31_5000);
-        assert_eq!(closing_balances.get(0).unwrap().held, 10_5000);
-        assert_eq!(closing_balances.get(0).unwrap().available, 21_0000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 31.5);
+        assert_eq!(closing_balances.get(0).unwrap().held, 10.5);
+        assert_eq!(closing_balances.get(0).unwrap().available, 21.0);
 
         accounts.add_transaction(Transaction {
             tx_type: TransactionType::Resolve,
@@ -401,8 +419,8 @@ mod tests {
 
         let closing_balances = accounts.generate_closing_balances();
         assert_eq!(closing_balances.len(), 1);
-        assert_eq!(closing_balances.get(0).unwrap().total, 31_5000);
-        assert_eq!(closing_balances.get(0).unwrap().held, 0);
-        assert_eq!(closing_balances.get(0).unwrap().available, 31_5000);
+        assert_eq!(closing_balances.get(0).unwrap().total, 31.5);
+        assert_eq!(closing_balances.get(0).unwrap().held, 0.0);
+        assert_eq!(closing_balances.get(0).unwrap().available, 31.5);
     }
 }
