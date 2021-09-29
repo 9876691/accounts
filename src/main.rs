@@ -208,10 +208,9 @@ impl Account {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut accounts: Accounts = Default::default();
-    let args: Vec<String> = std::env::args().collect();
 
-    if let Some(filename) = args.first() {
-
+    if let Some(filename) = std::env::args().nth(1) {
+        
         let mut rdr = csv::Reader::from_path(filename)?;
         for result in rdr.deserialize() {
             // Notice that we need to provide a type hint for automatic
