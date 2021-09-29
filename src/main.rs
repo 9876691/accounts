@@ -35,11 +35,11 @@ impl Account {
         self.transactions.push(tx);
     }
 
-    fn get_transaction(&self, tx_id: u32) -> Option<Transaction> {
-        let tx = self.transactions.iter().find(|tx| {
-            tx.transaction_id == tx_id
-                && tx.tx_type == TransactionType::Deposit
-        });
+    fn get_deposit(&self, tx_id: u32) -> Option<Transaction> {
+        let tx = self
+            .transactions
+            .iter()
+            .find(|tx| tx.transaction_id == tx_id && tx.tx_type == TransactionType::Deposit);
 
         if let Some(tx) = tx {
             return Some(Transaction {
@@ -115,9 +115,12 @@ impl Account {
         let mut held: f32 = 0.0;
         let mut available: f32 = 0.0;
         let mut locked: bool = false;
+        // Track disputed (and therefore resolved) transactions
         let mut disputed: HashMap<u32, u32> = Default::default();
 
         // The logic for running through transaction and updating held and available.
+        // A big match startment where we pattern match on the Transaction and
+        // destructure for the parameters we need.
         for tx in &self.transactions {
             match tx {
                 // Charge back
@@ -125,7 +128,8 @@ impl Account {
                     tx_type: TransactionType::Chargeback,
                     ..
                 } => {
-                    let tx = self.get_transaction(tx.transaction_id);
+                    // Get the matching deposit
+                    let tx = self.get_deposit(tx.transaction_id);
                     match tx {
                         Some(Transaction {
                             tx_type: TransactionType::Deposit,
@@ -156,7 +160,7 @@ impl Account {
                     tx_type: TransactionType::Dispute,
                     ..
                 } => {
-                    let tx = self.get_transaction(tx.transaction_id);
+                    let tx = self.get_deposit(tx.transaction_id);
                     match tx {
                         Some(Transaction {
                             tx_type: TransactionType::Deposit,
@@ -177,7 +181,7 @@ impl Account {
                     tx_type: TransactionType::Resolve,
                     ..
                 } => {
-                    let tx = self.get_transaction(tx.transaction_id);
+                    let tx = self.get_deposit(tx.transaction_id);
                     match tx {
                         Some(Transaction {
                             tx_type: TransactionType::Deposit,
